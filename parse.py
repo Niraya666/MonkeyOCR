@@ -19,7 +19,6 @@ def parse_pdf(input_file, output_dir, config_path):
     Args:
         input_file: Input PDF file path
         output_dir: Output directory
-        model_path: Model path
         config_path: Configuration file path
     """
     print(f"Starting to parse file: {input_file}")
@@ -85,47 +84,136 @@ def parse_pdf(input_file, output_dir, config_path):
     return local_md_dir
 
 
+def batch_process_pdfs(input_dir, output_dir, config_path, recursive=False):
+    """
+    批量处理目录中的所有PDF文件
+    
+    Args:
+        input_dir: 包含PDF文件的目录
+        output_dir: 输出目录
+        config_path: 配置文件路径
+        recursive: 是否递归处理子目录中的文件
+    
+    Returns:
+        处理成功的输出目录列表
+    """
+    if not os.path.isdir(input_dir):
+        raise NotADirectoryError(f"输入路径不是一个目录: {input_dir}")
+    
+    # 查找所有PDF文件
+    pdf_files = []
+    if recursive:
+        # 递归搜索子目录中的PDF文件
+        for root, _, files in os.walk(input_dir):
+            for file in files:
+                if file.lower().endswith('.pdf'):
+                    pdf_files.append(os.path.join(root, file))
+    else:
+        # 只搜索顶层目录中的PDF文件
+        pdf_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
+                    if f.lower().endswith('.pdf') and os.path.isfile(os.path.join(input_dir, f))]
+    
+    if not pdf_files:
+        print(f"在 {input_dir} 中没有找到PDF文件")
+        return []
+    
+    print(f"找到 {len(pdf_files)} 个PDF文件待处理")
+    
+    # 处理每个PDF文件
+    results = []
+    for i, pdf_path in enumerate(pdf_files, 1):
+        print(f"\n处理文件 {i}/{len(pdf_files)}: {pdf_path}")
+        
+        try:
+            result_dir = parse_pdf(pdf_path, output_dir, config_path)
+            results.append(result_dir)
+            print(f"✅ 成功处理: {pdf_path}")
+        except Exception as e:
+            print(f"❌ 处理失败 {pdf_path}: {str(e)}")
+    
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="PDF Document Parsing Tool",
+        description="PDF文档解析工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Usage examples:
+使用示例:
   python parse.py input.pdf
   python parse.py input.pdf -o ./output
-  python parse.py input.pdf -m /path/to/model -c model_configs.yaml
+  python parse.py input.pdf -c model_configs.yaml
+  python parse.py -b input_directory -o ./output
+  python parse.py -b input_directory -r -o ./output
         """
     )
     
     parser.add_argument(
-        "input_file",
-        help="Input PDF file path"
+        "input_path",
+        nargs="?",
+        help="输入PDF文件路径或目录(与-b一起使用时)"
+    )
+    
+    parser.add_argument(
+        "-b", "--batch",
+        action="store_true",
+        help="批量处理输入目录中的所有PDF文件"
+    )
+    
+    parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="递归处理子目录中的PDF文件(仅与-b一起使用)"
     )
     
     parser.add_argument(
         "-o", "--output",
         default="./output",
-        help="Output directory (default: ./output)"
+        help="输出目录 (默认: ./output)"
     )
     
     parser.add_argument(
         "-c", "--config",
         default="model_configs.yaml",
-        help="Configuration file path (default: model_configs.yaml)"
+        help="配置文件路径 (默认: model_configs.yaml)"
     )
     
     args = parser.parse_args()
     
+    if not args.input_path:
+        parser.error("需要提供输入路径")
+    
+    if args.recursive and not args.batch:
+        parser.error("-r/--recursive 选项只能与 -b/--batch 一起使用")
+    
     try:
-        result_dir = parse_pdf(
-            args.input_file,
-            args.output,
-            args.config
-        )
-        print(f"\n✅ Parsing completed! Results saved in: {result_dir}")
+        if args.batch:
+            # 批处理模式
+            print(f"开始批量处理目录中的PDF文件: {args.input_path}")
+            result_dirs = batch_process_pdfs(
+                args.input_path,
+                args.output,
+                args.config,
+                recursive=args.recursive
+            )
+            
+            if result_dirs:
+                print(f"\n✅ 批处理完成! 成功处理 {len(result_dirs)} 个文件。")
+                print(f"结果保存在: {args.output}")
+            else:
+                print("\n⚠️ 没有成功处理任何文件。")
+                
+        else:
+            # 单文件处理模式
+            result_dir = parse_pdf(
+                args.input_path,
+                args.output,
+                args.config
+            )
+            print(f"\n✅ 解析完成! 结果保存在: {result_dir}")
         
     except Exception as e:
-        print(f"\n❌ Parsing failed: {str(e)}", file=sys.stderr)
+        print(f"\n❌ 处理失败: {str(e)}", file=sys.stderr)
         sys.exit(1)
 
 
