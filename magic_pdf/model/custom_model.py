@@ -8,11 +8,12 @@ from magic_pdf.model.model_list import AtomicModel
 from transformers import LayoutLMv3ForTokenClassification
 from loguru import logger
 import yaml
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, AutoTokenizer
 from qwen_vl_utils import process_vision_info
 from PIL import Image
 import requests
 from typing import List, Union
+from vllm import LLM, SamplingParams
 
 
 class MonkeyOCR:
@@ -97,6 +98,9 @@ class MonkeyOCR:
             logger.info('Use transformers as backend')
             batch_size = self.chat_config.get('batch_size', 5)
             self.chat_model = MonkeyChat_transformers(chat_path, batch_size, device=self.device)
+        elif chat_backend == 'vllm':
+            logger.info('Use VLLM as backend')
+            self.chat_model = MonkeyChat_VLLM(chat_path)
         else:
             logger.warning('Use LMDeploy as default backend')
             self.chat_model = MonkeyChat_LMDeploy(chat_path)
@@ -326,3 +330,105 @@ class MonkeyChat_transformers:
     
     def single_inference(self, image: Union[str, Image.Image], question: str) -> str:
         return self._process_single(image, question)
+
+
+class MonkeyChat_VLLM:
+    def __init__(self, model_path, **kwargs):
+        self.model_name = os.path.basename(model_path)
+        logger.info(f'Initializing VLLM with model: {model_path}')
+        
+        # Initialize VLLM engine
+        self.llm = LLM(
+            model=model_path,
+            trust_remote_code=True,
+            dtype="auto",  # VLLM can auto-select appropriate dtype
+            max_model_len=4096,
+            limit_mm_per_prompt={"image": 5}  # Allow up to 5 images per prompt
+        )
+        
+        # Load processor for the model
+        try:
+            self.processor = AutoProcessor.from_pretrained(model_path)
+        except Exception as e:
+            logger.warning(f"Failed to load processor, using tokenizer instead: {e}")
+            self.processor = AutoTokenizer.from_pretrained(model_path)
+        
+        # Try to import qwen_vl_utils for image resizing (commonly used with Qwen models)
+        try:
+            from qwen_vl_utils import smart_resize
+            self.smart_resize = smart_resize
+            logger.info("Using qwen_vl_utils for image resizing")
+        except ImportError:
+            logger.warning("qwen_vl_utils not installed. Images won't be automatically resized.")
+            self.smart_resize = None
+        
+        # Define generation config similar to LMDeploy's config
+        self.gen_config = SamplingParams(
+            temperature=0.0,
+            max_tokens=4096,
+            repetition_penalty=1.05
+        )
+        
+        logger.info(f"VLLM initialization complete for {self.model_name}")
+    
+    def process_image(self, image_path):
+        """Process image for the model"""
+        # Load image
+        if isinstance(image_path, str):
+            img = Image.open(image_path)
+        else:
+            img = image_path
+        
+        # Apply smart resize if available (for Qwen models)
+        if self.smart_resize:
+            width, height = img.size
+            resized_height, resized_width = self.smart_resize(
+                height, width, max_pixels=1024 * 28 * 28
+            )
+            return img.resize((resized_width, resized_height))
+        
+        return img
+    
+    def batch_inference(self, images, questions):
+        results = []
+        
+        for img_path, question in zip(images, questions):
+            try:
+                # Process image
+                image = self.process_image(img_path)
+                
+                # Create messages in format expected by model
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": "placeholder"},  # Placeholder
+                            {"type": "text", "text": question}
+                        ]
+                    }
+                ]
+                
+                # Format prompt using the processor
+                prompt = self.processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                
+                # Run inference with VLLM
+                outputs = self.llm.generate(
+                    {
+                        "prompt": prompt,
+                        "multi_modal_data": {"image": [image]}
+                    },
+                    sampling_params=self.gen_config
+                )
+                
+                # Extract text from the response
+                text = outputs[0].outputs[0].text
+                results.append(text)
+                
+            except Exception as e:
+                logger.error(f"Error in VLLM inference: {str(e)}")
+                results.append("")
+        
+        return results
